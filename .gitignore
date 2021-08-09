@@ -1,5 +1,10 @@
 # Initially taken from Github's Python gitignore file
 
+*.pt
+logs/
+results/
+ckpt/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
