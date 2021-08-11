@@ -265,12 +265,16 @@ def parse_args():
         "--cache_dir", type=str, default=None, help="Where to store the pretrained models downloaded from huggingface.co",
     )
     parser.add_argument(
-        "--metric", type=str, default="bleu",
-        help="rouge or bleu",
+        "--metric", type=str, default="bleu", help="rouge or bleu",
     )
     parser.add_argument(
-        "--gt-langs", type=str, default="en-fr-es-ru-de",
-        help="multi-language code for generation",
+        "--gt-langs", type=str, default="en-fr-es-ru-de", help="multi-language code for generation",
+    )
+    parser.add_argument(
+        "--data_folder", type=str, default=None, help="data_folder",
+    )
+    parser.add_argument(
+        "--multi_train", default=True, help="Whether to multi_train",
     )
 
     args = parser.parse_args()
@@ -343,7 +347,9 @@ def main():
     #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
-    if args.dataset_name is not None:
+    if args.dataset_name in ["ntg", "qg"]:
+        raw_datasets = load_xglue(args.dataset_name, args.data_path)
+    elif args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
         raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name, cache_dir=args.data_cache_dir)
     else:
@@ -356,6 +362,10 @@ def main():
             data_files["test"] = args.test_file
         extension = args.train_file.split(".")[-1]
         raw_datasets = load_dataset(extension, data_files=data_files)
+
+    print("raw_datasets")
+    for k, v in raw_datasets.items():
+        print(k, v)
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
@@ -374,7 +384,7 @@ def main():
     if args.tokenizer_name:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, use_fast=args.use_fast_tokenizer, cache_dir=args.cache_dir)
     elif args.model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=args.use_fast_tokenizer, cache_dir=args.cache_dirr)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=args.use_fast_tokenizer, cache_dir=args.cache_dir)
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
@@ -456,17 +466,17 @@ def main():
     )
 
     train_dataset = processed_datasets["train"]
-    for index in random.sample(range(len(train_dataset)), 5):
+    for index in random.sample(range(len(train_dataset)), 2):
         logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
 
     eval_dataset, test_dataset = {}, {}
     for lg in gt_langs:
         eval_dataset[lg] = processed_datasets["validation." + lg]
-        for index in random.sample(range(len(eval_dataset[lg])), 5):
+        for index in random.sample(range(len(eval_dataset[lg])), 2):
             logger.info(f"Sample {index} of the eval_dataset[{lg}] set: {eval_dataset[lg][index]}.")
 
         test_dataset[lg] = processed_datasets["test." + lg]
-        for index in random.sample(range(len(test_dataset[lg])), 5):
+        for index in random.sample(range(len(test_dataset[lg])), 2):
             logger.info(f"Sample {index} of the test_dataset[{lg}] set: {test_dataset[lg][index]}.")
 
     label_pad_token_id = -100 if args.ignore_pad_token_for_loss else tokenizer.pad_token_id
@@ -554,9 +564,7 @@ def main():
     for epoch in range(args.num_train_epochs):
         model.train()
         for step, batch in enumerate(train_dataloader):
-            print("batch", batch)
             outputs = model(**batch)
-            print("outputs", outputs)
             loss = outputs.loss
             loss = loss / args.gradient_accumulation_steps
             accelerator.backward(loss)

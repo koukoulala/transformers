@@ -4,4 +4,5 @@ nohup python -u examples/pytorch/summarization/run_xglue.py  --model_name_or_pat
 
 #8.11
 nohup python -u examples/pytorch/summarization/run_xglue_no_trainer.py  --model_name_or_path 'microsoft/xprophetnet-large-wiki100-cased-xglue-ntg'  --dataset_name xglue  --dataset_config_name ntg   --output_dir ./results/xpro_ntg --per_device_train_batch_size=4 --per_device_eval_batch_size=4 --cache_dir=../ckpt/xprophtnet_ntg --data_cache_dir=../datasets/transformer_ntg &> logs/xpro_ntg.out &
+nohup python -u examples/pytorch/summarization/run_xglue_no_trainer.py  --model_name_or_path 'microsoft/xprophetnet-large-wiki100-cased-xglue-ntg'  --dataset_name xglue  --dataset_config_name ntg   --output_dir ./results/xpro_ntg --per_device_train_batch_size=1 --per_device_eval_batch_size=1 --cache_dir=../ckpt/xprophtnet_ntg --data_cache_dir=../datasets/transformer_ntg --max_source_length=128 &> logs/xpro_ntg.out &
 
