@@ -49,7 +49,8 @@ from transformers import (
 )
 from transformers.file_utils import is_offline_mode
 from transformers.utils.versions import require_version
-
+from preprocess_data import load_xglue
+import pickle
 
 logger = logging.getLogger(__name__)
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/summarization/requirements.txt")
@@ -81,7 +82,6 @@ summarization_name_mapping = {
     "xsum": ("document", "summary"),
     "wiki_summary": ("article", "highlights"),
 }
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Finetune a transformers model on a summarization task")
@@ -274,7 +274,10 @@ def parse_args():
         "--data_folder", type=str, default=None, help="data_folder",
     )
     parser.add_argument(
-        "--multi_train", default=True, help="Whether to multi_train",
+        "--multi_train", default=False, help="Whether to multi_train",
+    )
+    parser.add_argument(
+        "--overwrite_processed", type=bool, default=False, help="Overwrite the processed training and evaluation sets"
     )
 
     args = parser.parse_args()
@@ -294,6 +297,34 @@ def parse_args():
         os.makedirs(args.output_dir, exist_ok=True)
 
     return args
+
+def postprocess_text(preds, labels):
+        preds = [pred.strip() for pred in preds]
+        labels = [label.strip() for label in labels]
+
+        # rougeLSum expects newline after each sentence
+        preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+        labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
+
+        return preds, labels
+
+def trainer(train_dataloader, model, args, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps):
+    for step, batch in enumerate(train_dataloader):
+        outputs = model(**batch)
+        loss = outputs.loss
+        loss = loss / args.gradient_accumulation_steps
+        accelerator.backward(loss)
+        if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
+            progress_bar.update(1)
+            completed_steps += 1
+
+        if completed_steps >= args.max_train_steps:
+            break
+
+    return model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps
 
 
 def main():
@@ -334,41 +365,6 @@ def main():
     if args.seed is not None:
         set_seed(args.seed)
 
-    # get ntg language
-    gt_langs = args.gt_langs.split('-')
-    logger.info(f"gt_langs: {gt_langs}")
-
-    # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
-    # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
-    # (the dataset will be downloaded automatically from the datasets Hub).
-    #
-    # For CSV/JSON files, this script will use the column called 'text' or the first column if no column called
-    # 'text' is found. You can easily tweak this behavior (see below).
-    #
-    # In distributed training, the load_dataset function guarantee that only one local process can concurrently
-    # download the dataset.
-    if args.dataset_name in ["ntg", "qg"]:
-        raw_datasets = load_xglue(args.dataset_name, args.data_path)
-    elif args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name, cache_dir=args.data_cache_dir)
-    else:
-        data_files = {}
-        if args.train_file is not None:
-            data_files["train"] = args.train_file
-        if args.validation_file is not None:
-            data_files["validation"] = args.validation_file
-        if args.test_file is not None:
-            data_files["test"] = args.test_file
-        extension = args.train_file.split(".")[-1]
-        raw_datasets = load_dataset(extension, data_files=data_files)
-
-    print("raw_datasets")
-    for k, v in raw_datasets.items():
-        print(k, v)
-    # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
-    # https://huggingface.co/docs/datasets/loading_datasets.html.
-
     # Load pretrained model and tokenizer
     #
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
@@ -406,7 +402,54 @@ def main():
     if model.config.decoder_start_token_id is None:
         raise ValueError("Make sure that `config.decoder_start_token_id` is correctly defined")
 
+    # Optimizer
+    # Split weights in two groups, one with weight decay and the other not.
+    no_decay = ["bias", "LayerNorm.weight"]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "weight_decay": args.weight_decay,
+        },
+        {
+            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+    ]
+    optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+    model, optimizer = accelerator.prepare(model, optimizer)
+
     prefix = args.source_prefix if args.source_prefix is not None else ""
+
+    # get ntg language
+    gt_langs = args.gt_langs.split('-')
+    logger.info(f"gt_langs: {gt_langs}")
+
+    # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
+    # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
+    # (the dataset will be downloaded automatically from the datasets Hub).
+    #
+    # For CSV/JSON files, this script will use the column called 'text' or the first column if no column called
+    # 'text' is found. You can easily tweak this behavior (see below).
+    #
+    # In distributed training, the load_dataset function guarantee that only one local process can concurrently
+    # download the dataset.
+    if args.dataset_name in ["ntg", "qg"]:
+        raw_datasets = load_xglue(args.dataset_name, args.data_folder, gt_langs, args.multi_train)
+    elif args.dataset_name is not None:
+        # Downloading and loading a dataset from the hub.
+        raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name, cache_dir=args.data_cache_dir)
+    else:
+        data_files = {}
+        if args.train_file is not None:
+            data_files["train"] = args.train_file
+        if args.validation_file is not None:
+            data_files["validation"] = args.validation_file
+        if args.test_file is not None:
+            data_files["test"] = args.test_file
+        extension = args.train_file.split(".")[-1]
+        raw_datasets = load_dataset(extension, data_files=data_files)
+
+    print("raw_datasets")
 
     # Preprocessing the datasets.
     # First we tokenize all the texts.
@@ -457,27 +500,31 @@ def main():
         model_inputs["labels"] = labels["input_ids"]
         return model_inputs
 
-    processed_datasets = raw_datasets.map(
-        preprocess_function,
-        batched=True,
-        remove_columns=column_names,
-        load_from_cache_file=not args.overwrite_cache,
-        desc="Running tokenizer on dataset",
-    )
-
-    train_dataset = processed_datasets["train"]
-    for index in random.sample(range(len(train_dataset)), 2):
-        logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
-
-    eval_dataset, test_dataset = {}, {}
-    for lg in gt_langs:
-        eval_dataset[lg] = processed_datasets["validation." + lg]
-        for index in random.sample(range(len(eval_dataset[lg])), 2):
-            logger.info(f"Sample {index} of the eval_dataset[{lg}] set: {eval_dataset[lg][index]}.")
-
-        test_dataset[lg] = processed_datasets["test." + lg]
-        for index in random.sample(range(len(test_dataset[lg])), 2):
-            logger.info(f"Sample {index} of the test_dataset[{lg}] set: {test_dataset[lg][index]}.")
+    if args.dataset_name in ["ntg", "qg"]:
+        processed_datasets_path = os.path.join(args.data_folder, "processed_datasets.pkl")
+        if os.path.exists(processed_datasets_path) and not args.overwrite_processed:
+            tmp_file = open(processed_datasets_path, "rb")
+            processed_datasets = pickle.load(tmp_file)
+            tmp_file.close()
+            logger.info("load processed_datasets.")
+        else:
+            processed_datasets = raw_datasets.map(
+                preprocess_function,
+                batched=True,
+                remove_columns=column_names,
+                load_from_cache_file=not args.overwrite_cache,
+                desc="Running tokenizer on dataset",
+            )
+            with open(processed_datasets_path, 'wb') as f:
+                pickle.dump(processed_datasets, f)
+    else:
+        processed_datasets = raw_datasets.map(
+            preprocess_function,
+            batched=True,
+            remove_columns=column_names,
+            load_from_cache_file=not args.overwrite_cache,
+            desc="Running tokenizer on dataset",
+        )
 
     label_pad_token_id = -100 if args.ignore_pad_token_for_loss else tokenizer.pad_token_id
     data_collator = DataCollatorForSeq2Seq(
@@ -487,51 +534,52 @@ def main():
         pad_to_multiple_of=8 if accelerator.use_fp16 else None,
     )
 
-    def postprocess_text(preds, labels):
-        preds = [pred.strip() for pred in preds]
-        labels = [label.strip() for label in labels]
-
-        # rougeLSum expects newline after each sentence
-        preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
-        labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
-
-        return preds, labels
-
-    train_dataloader = DataLoader(
-        train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
-    )
+    if not args.multi_train:
+        train_dataset = processed_datasets["train"]
+        for index in random.sample(range(len(train_dataset)), 1):
+            logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
+        train_dataloader = DataLoader(
+            train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
+        )
+        train_dataloader = accelerator.prepare(train_dataloader)
+        train_len = len(train_dataloader)
+    else:
+        train_dataset = {}
+        train_dataloader = {}
+        train_len = 0
+    eval_dataset, test_dataset = {}, {}
     eval_dataloader, test_dataloader = {}, {}
     for lg in gt_langs:
-        eval_dataloader[lg] = DataLoader(eval_dataset[lg], collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
-        test_dataloader[lg] = DataLoader(test_dataset[lg], collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
+        if args.multi_train:
+            train_dataset[lg] = processed_datasets["train." + lg]
+            for index in random.sample(range(len(train_dataset[lg])), 1):
+                logger.info(f"Sample {index} of the train_dataset[{lg}] set: {train_dataset[lg][index]}.")
+            train_dataloader[lg] = DataLoader(
+                train_dataset[lg], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
+            )
+            train_dataloader[lg] = accelerator.prepare(train_dataloader[lg])
+            train_len += len(train_dataloader[lg])
 
-    # Optimizer
-    # Split weights in two groups, one with weight decay and the other not.
-    no_decay = ["bias", "LayerNorm.weight"]
-    optimizer_grouped_parameters = [
-        {
-            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-            "weight_decay": args.weight_decay,
-        },
-        {
-            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
-            "weight_decay": 0.0,
-        },
-    ]
-    optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+        eval_dataset[lg] = processed_datasets["validation." + lg]
+        for index in random.sample(range(len(eval_dataset[lg])), 1):
+            logger.info(f"Sample {index} of the eval_dataset[{lg}] set: {eval_dataset[lg][index]}.")
+        eval_dataloader[lg] = DataLoader(eval_dataset[lg], collate_fn=data_collator,
+                                         batch_size=args.per_device_eval_batch_size)
 
-    # Prepare everything with our `accelerator`.
-    model, optimizer, train_dataloader = accelerator.prepare(
-        model, optimizer, train_dataloader
-    )
-    for lg in gt_langs:
+        test_dataset[lg] = processed_datasets["test." + lg]
+        for index in random.sample(range(len(test_dataset[lg])), 2):
+            logger.info(f"Sample {index} of the test_dataset[{lg}] set: {test_dataset[lg][index]}.")
+        test_dataloader[lg] = DataLoader(test_dataset[lg], collate_fn=data_collator,
+                                         batch_size=args.per_device_eval_batch_size)
+
         eval_dataloader[lg], test_dataloader[lg] = accelerator.prepare(eval_dataloader[lg], test_dataloader[lg])
+
 
     # Note -> the training dataloader needs to be prepared before we grab his length below (cause its length will be
     # shorter in multiprocess)
 
     # Scheduler and math around the number of training steps.
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(train_len / args.gradient_accumulation_steps)
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     else:
@@ -551,7 +599,7 @@ def main():
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
+    logger.info(f"  Num examples = {train_len}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
@@ -563,20 +611,13 @@ def main():
 
     for epoch in range(args.num_train_epochs):
         model.train()
-        for step, batch in enumerate(train_dataloader):
-            outputs = model(**batch)
-            loss = outputs.loss
-            loss = loss / args.gradient_accumulation_steps
-            accelerator.backward(loss)
-            if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-                progress_bar.update(1)
-                completed_steps += 1
-
-            if completed_steps >= args.max_train_steps:
-                break
+        if not args.multi_train:
+            model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps = \
+                trainer(train_dataloader, model, args, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps)
+        else:
+            for lg in gt_langs:
+                model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps= \
+                    trainer(train_dataloader[lg], model, args, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps)
 
         model.eval()
         if args.val_max_target_length is None:
