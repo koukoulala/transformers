@@ -200,9 +200,9 @@ def parse_args():
         help="The name of the column in the datasets containing the summaries (for summarization).",
     )
     parser.add_argument(
-        "--use_slow_tokenizer",
-        action="store_true",
-        help="If passed, will use a slow tokenizer (not backed by the 🤗 Tokenizers library).",
+        "--use_fast_tokenizer",
+        default=True,
+        help="Whether to use one of the fast tokenizer (backed by the tokenizers library) or not.",
     )
     parser.add_argument(
         "--per_device_train_batch_size",
@@ -372,9 +372,9 @@ def main():
         logger.warning("You are instantiating a new config instance from scratch.")
 
     if args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, use_fast=not args.use_slow_tokenizer, cache_dir=args.cache_dir)
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, use_fast=args.use_fast_tokenizer, cache_dir=args.cache_dir)
     elif args.model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=not args.use_slow_tokenize, cache_dir=args.cache_dirr)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=args.use_fast_tokenizer, cache_dir=args.cache_dirr)
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
