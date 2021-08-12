@@ -51,6 +51,7 @@ from transformers.file_utils import is_offline_mode
 from transformers.utils.versions import require_version
 from preprocess_data import load_xglue
 import pickle
+import sacrebleu
 
 logger = logging.getLogger(__name__)
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/summarization/requirements.txt")
@@ -308,6 +309,12 @@ def postprocess_text(preds, labels):
 
         return preds, labels
 
+def compute_bleus(preds, labels):
+    preds, labels = np.array(preds), np.array(labels)
+    result = sacrebleu.corpus_bleu(preds, [labels], lowercase=True).score / 100  # Normalize
+
+    return result
+
 def trainer(train_dataloader, model, args, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps):
     for step, batch in enumerate(train_dataloader):
         outputs = model(**batch)
@@ -326,6 +333,69 @@ def trainer(train_dataloader, model, args, accelerator, optimizer, lr_scheduler,
 
     return model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps
 
+def evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer, metric):
+    model.eval()
+    if args.val_max_target_length is None:
+        args.val_max_target_length = args.max_target_length
+
+    gen_kwargs = {
+        "max_length": args.val_max_target_length if args is not None else config.max_length,
+        "num_beams": args.num_beams,
+    }
+    results = {}
+    for lg in gt_langs:
+        logger.info(f"  evaluate language : {lg}")
+        preds_lg, labels_lg = [], []
+        for step, batch in enumerate(eval_dataloader[lg]):
+            with torch.no_grad():
+                generated_tokens = accelerator.unwrap_model(model).generate(
+                    batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    **gen_kwargs,
+                )
+
+                generated_tokens = accelerator.pad_across_processes(
+                    generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
+                )
+                labels = batch["labels"]
+                if not args.pad_to_max_length:
+                    # If we did not pad to max length, we need to pad the labels too
+                    labels = accelerator.pad_across_processes(batch["labels"], dim=1, pad_index=tokenizer.pad_token_id)
+
+                generated_tokens = accelerator.gather(generated_tokens).cpu().numpy()
+                labels = accelerator.gather(labels).cpu().numpy()
+
+                if args.ignore_pad_token_for_loss:
+                    # Replace -100 in the labels as we can't decode them.
+                    labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+                if isinstance(generated_tokens, tuple):
+                    generated_tokens = generated_tokens[0]
+                decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+                decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+                input_seq = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
+                '''
+                print("input_seq", input_seq)
+                print("postprocess_text, decoded_preds", decoded_preds)
+                print("postprocess_text, decoded_labels", decoded_labels)
+                '''
+
+                preds_lg.extend(decoded_preds)
+                labels_lg.extend(decoded_labels)
+
+        results[lg] = compute_bleus(preds_lg, labels_lg)
+        logger.info(f"language {lg} results:")
+        logger.info(results[lg])
+
+    avg = 0
+    count = 0
+    for key in results.keys():
+        avg += results[key]
+        count += 1
+    avg /= count
+    results["avg"] = avg
+    print("All language results:", results)
+
+    return model
 
 def main():
     args = parse_args()
@@ -595,6 +665,12 @@ def main():
     # Metric
     metric = load_metric(args.metric)
 
+    logger.info("***** Running first evaluating *****")
+    model = evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer, metric)
+
+    logger.info("***** Running first testing *****")
+    model = evaluated(model, args, config, gt_langs, test_dataloader, accelerator, tokenizer, metric)
+
     # Train!
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
@@ -616,67 +692,14 @@ def main():
                 trainer(train_dataloader, model, args, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps)
         else:
             for lg in gt_langs:
-                model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps= \
+                model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps = \
                     trainer(train_dataloader[lg], model, args, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps)
 
-        model.eval()
-        if args.val_max_target_length is None:
-            args.val_max_target_length = args.max_target_length
+        logger.info("***** Running evaluating *****")
+        model = evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer, metric)
 
-        gen_kwargs = {
-            "max_length": args.val_max_target_length if args is not None else config.max_length,
-            "num_beams": args.num_beams,
-        }
-        for lg in gt_langs:
-            logger.info(f"  evaluate language : {lg}")
-            for step, batch in enumerate(eval_dataloader[lg]):
-                with torch.no_grad():
-                    generated_tokens = accelerator.unwrap_model(model).generate(
-                        batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        **gen_kwargs,
-                    )
-
-                    generated_tokens = accelerator.pad_across_processes(
-                        generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
-                    )
-                    labels = batch["labels"]
-                    if not args.pad_to_max_length:
-                        # If we did not pad to max length, we need to pad the labels too
-                        labels = accelerator.pad_across_processes(batch["labels"], dim=1, pad_index=tokenizer.pad_token_id)
-
-                    generated_tokens = accelerator.gather(generated_tokens).cpu().numpy()
-                    labels = accelerator.gather(labels).cpu().numpy()
-
-                    print("generated_tokens", generated_tokens)
-                    print("labels", labels)
-
-                    if args.ignore_pad_token_for_loss:
-                        # Replace -100 in the labels as we can't decode them.
-                        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-                    if isinstance(generated_tokens, tuple):
-                        generated_tokens = generated_tokens[0]
-                    decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
-                    decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-
-                    print("decoded_preds", decoded_preds)
-                    print("decoded_labels", decoded_labels)
-
-                    decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
-
-                    print("postprocess_text, decoded_preds", decoded_preds)
-                    print("postprocess_text, decoded_labels", decoded_labels)
-
-                    metric.add_batch(predictions=decoded_preds, references=decoded_labels)
-            result = metric.compute(use_stemmer=True)
-            print("result", lg, result)
-            # Extract a few results from ROUGE
-            result = {key: value.mid.fmeasure * 100 for key, value in result.items()}
-
-            result = {k: round(v, 4) for k, v in result.items()}
-
-            logger.info(f"language {lg} results:")
-            logger.info(result)
+        logger.info("***** Running testing *****")
+        model = evaluated(model, args, config, gt_langs, test_dataloader, accelerator, tokenizer, metric)
 
     if args.output_dir is not None:
         accelerator.wait_for_everyone()
