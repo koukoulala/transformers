@@ -419,7 +419,7 @@ def main():
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
-    logger.info(accelerator.state)
+    logger.info("accelerator.state", accelerator.state)
 
     # Setup logging, we only want one process per machine to log things on the screen.
     # accelerator.is_local_main_process is only True for one process per machine.
@@ -671,8 +671,8 @@ def main():
         num_training_steps=args.max_train_steps,
     )
 
-    logger.info("***** Running first evaluating *****")
-    model, results = evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer)
+    #logger.info("***** Running first evaluating *****")
+    #model, results = evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer)
 
     logger.info("***** Running first testing *****")
     model, results = evaluated(model, args, config, gt_langs, test_dataloader, accelerator, tokenizer)
