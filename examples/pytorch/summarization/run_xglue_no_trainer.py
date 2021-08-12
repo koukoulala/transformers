@@ -333,7 +333,7 @@ def trainer(train_dataloader, model, args, accelerator, optimizer, lr_scheduler,
 
     return model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps
 
-def evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer, metric):
+def evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer):
     model.eval()
     if args.val_max_target_length is None:
         args.val_max_target_length = args.max_target_length
@@ -372,8 +372,8 @@ def evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, token
                     generated_tokens = generated_tokens[0]
                 decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
                 decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-                input_seq = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
                 '''
+                input_seq = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
                 print("input_seq", input_seq)
                 print("postprocess_text, decoded_preds", decoded_preds)
                 print("postprocess_text, decoded_labels", decoded_labels)
@@ -395,7 +395,7 @@ def evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, token
     results["avg"] = avg
     print("All language results:", results)
 
-    return model
+    return model, results
 
 def main():
     args = parse_args()
@@ -519,7 +519,7 @@ def main():
         extension = args.train_file.split(".")[-1]
         raw_datasets = load_dataset(extension, data_files=data_files)
 
-    print("raw_datasets")
+    print("raw_datasets", raw_datasets)
 
     # Preprocessing the datasets.
     # First we tokenize all the texts.
@@ -604,9 +604,12 @@ def main():
         pad_to_multiple_of=8 if accelerator.use_fp16 else None,
     )
 
+    index_list = [0, 5]
     if not args.multi_train:
         train_dataset = processed_datasets["train"]
-        for index in random.sample(range(len(train_dataset)), 1):
+        logger.info(f"\nNumber of train_dataset: {len(train_dataset)}.")
+        #for index in random.sample(range(len(train_dataset)), 1):
+        for index in index_list:
             logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
         train_dataloader = DataLoader(
             train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
@@ -622,7 +625,9 @@ def main():
     for lg in gt_langs:
         if args.multi_train:
             train_dataset[lg] = processed_datasets["train." + lg]
-            for index in random.sample(range(len(train_dataset[lg])), 1):
+            logger.info(f"\nNumber of {lg} train_dataset: {len(train_dataset[lg])}.")
+            #for index in random.sample(range(len(train_dataset[lg])), 1):
+            for index in index_list:
                 logger.info(f"Sample {index} of the train_dataset[{lg}] set: {train_dataset[lg][index]}.")
             train_dataloader[lg] = DataLoader(
                 train_dataset[lg], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
@@ -631,13 +636,17 @@ def main():
             train_len += len(train_dataloader[lg])
 
         eval_dataset[lg] = processed_datasets["validation." + lg]
-        for index in random.sample(range(len(eval_dataset[lg])), 1):
+        logger.info(f"\nNumber of {lg} eval_dataset: {len(eval_dataset[lg])}.")
+        #for index in random.sample(range(len(eval_dataset[lg])), 1):
+        for index in index_list:
             logger.info(f"Sample {index} of the eval_dataset[{lg}] set: {eval_dataset[lg][index]}.")
         eval_dataloader[lg] = DataLoader(eval_dataset[lg], collate_fn=data_collator,
                                          batch_size=args.per_device_eval_batch_size)
 
         test_dataset[lg] = processed_datasets["test." + lg]
-        for index in random.sample(range(len(test_dataset[lg])), 2):
+        logger.info(f"\nNumber of {lg} test_dataset: {len(test_dataset[lg])}.")
+        #for index in random.sample(range(len(test_dataset[lg])), 1):
+        for index in index_list:
             logger.info(f"Sample {index} of the test_dataset[{lg}] set: {test_dataset[lg][index]}.")
         test_dataloader[lg] = DataLoader(test_dataset[lg], collate_fn=data_collator,
                                          batch_size=args.per_device_eval_batch_size)
@@ -662,14 +671,11 @@ def main():
         num_training_steps=args.max_train_steps,
     )
 
-    # Metric
-    metric = load_metric(args.metric)
-
     logger.info("***** Running first evaluating *****")
-    model = evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer, metric)
+    model, results = evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer)
 
     logger.info("***** Running first testing *****")
-    model = evaluated(model, args, config, gt_langs, test_dataloader, accelerator, tokenizer, metric)
+    model, results = evaluated(model, args, config, gt_langs, test_dataloader, accelerator, tokenizer)
 
     # Train!
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -685,6 +691,8 @@ def main():
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
 
+    best_eval_result = 0.0
+    best_test_result = {"avg": 0.0}
     for epoch in range(args.num_train_epochs):
         model.train()
         if not args.multi_train:
@@ -696,15 +704,30 @@ def main():
                     trainer(train_dataloader[lg], model, args, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps)
 
         logger.info("***** Running evaluating *****")
-        model = evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer, metric)
+        model, results = evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer)
+        if results["avg"] > best_eval_result:
+            best_eval_result = results["avg"]
 
-        logger.info("***** Running testing *****")
-        model = evaluated(model, args, config, gt_langs, test_dataloader, accelerator, tokenizer, metric)
+            logger.info("***** Running testing *****")
+            model, results = evaluated(model, args, config, gt_langs, test_dataloader, accelerator, tokenizer)
+            if results["avg"] > best_test_result["avg"]:
+                best_test_result = results
+
+            if args.output_dir is not None:
+                best_dir = os.path.join(args.output_dir, "best")
+                os.makedirs(best_dir, exist_ok=True)
+                accelerator.wait_for_everyone()
+                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model.save_pretrained(best_dir, save_function=accelerator.save)
+
+    logger.info(f"  best test results = {best_test_result}")
 
     if args.output_dir is not None:
+        final_dir = os.path.join(args.output_dir, "final")
+        os.makedirs(final_dir, exist_ok=True)
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
-        unwrapped_model.save_pretrained(args.output_dir, save_function=accelerator.save)
+        unwrapped_model.save_pretrained(final_dir, save_function=accelerator.save)
 
 
 if __name__ == "__main__":

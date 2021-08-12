@@ -12,5 +12,7 @@ CUDA_VISIBLE_DEVICES=1,0 nohup python -u examples/pytorch/summarization/run_xglu
 
 #8.12
 CUDA_VISIBLE_DEVICES=1,0 nohup python -u examples/pytorch/summarization/run_xglue_no_trainer.py  --model_name_or_path 'microsoft/xprophetnet-large-wiki100-cased-xglue-ntg'  --dataset_name=ntg --data_folder=../datasets/xglue_full_dataset/sampled_NTG  --output_dir=./results/xpro_ntg --per_device_train_batch_size=1 --per_device_eval_batch_size=2 --cache_dir=../ckpt/xprophtnet_ntg --max_source_length=128 &> logs/xpro_ntg.out &
-
+nohup python -u examples/pytorch/summarization/preprocess_data.py &> logs/preprocess_data.out &
+CUDA_VISIBLE_DEVICES=0 nohup python -u examples/pytorch/summarization/run_xglue_no_trainer.py  --model_name_or_path 'microsoft/xprophetnet-large-wiki100-cased-xglue-ntg'  --dataset_name=ntg --data_folder=../datasets/xglue_full_dataset/sampled_NTG  --output_dir=./results/xpro_ntg --per_device_train_batch_size=1 --per_device_eval_batch_size=32 --cache_dir=../ckpt/xprophtnet_ntg --overwrite_processed=True &> logs/xpro_ntg_0.out &
+CUDA_VISIBLE_DEVICES=0 nohup python -u examples/pytorch/summarization/run_xglue_no_trainer.py  --model_name_or_path 'microsoft/xprophetnet-large-wiki100-cased-xglue-ntg'  --dataset_name=ntg --data_folder=../datasets/xglue_full_dataset/sampled_NTG  --output_dir=./results/xpro_ntg --per_device_train_batch_size=1 --per_device_eval_batch_size=32 --cache_dir=../ckpt/xprophtnet_ntg &> logs/xpro_ntg_0.out &
 
