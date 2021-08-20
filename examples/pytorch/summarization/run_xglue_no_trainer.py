@@ -46,6 +46,8 @@ from transformers import (
     SchedulerType,
     get_scheduler,
     set_seed,
+    XLMProphetNetTokenizer, XLMProphetNetForConditionalGeneration, XLMProphetNetConfig,
+    Seq2SeqTrainingArguments,
 )
 from transformers.file_utils import is_offline_mode
 from transformers.utils.versions import require_version
@@ -155,7 +157,7 @@ def parse_args():
         default=128,
         help=(
             "The maximum total input sequence length after tokenization. Sequences longer than this will be truncated,"
-            " sequences shorter will be padded if `--pad_to_max_lengh` is passed."
+            " sequences shorter will be padded if `--pad_to_max_length` is passed."
         ),
     )
     parser.add_argument(
@@ -269,7 +271,7 @@ def parse_args():
         "--metric", type=str, default="bleu", help="rouge or bleu",
     )
     parser.add_argument(
-        "--gt-langs", type=str, default="en-fr-es-ru-de", help="multi-language code for generation",
+        "--gt-langs", type=str, default="fr-en-es-ru-de", help="multi-language code for generation",
     )
     parser.add_argument(
         "--data_folder", type=str, default=None, help="data_folder",
@@ -310,7 +312,7 @@ def postprocess_text(preds, labels):
         return preds, labels
 
 def compute_bleus(preds, labels):
-    preds, labels = np.array(preds), np.array(labels)
+    preds, labels = np.concatenate(preds), np.concatenate(labels)
     result = sacrebleu.corpus_bleu(preds, [labels], lowercase=True).score / 100  # Normalize
 
     return result
@@ -333,7 +335,10 @@ def trainer(train_dataloader, model, args, accelerator, optimizer, lr_scheduler,
 
     return model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps
 
-def evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer):
+def evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer, dir_name="first_eval"):
+    save_dir = os.path.join(args.output_dir, dir_name)
+    os.makedirs(save_dir, exist_ok=True)
+
     model.eval()
     if args.val_max_target_length is None:
         args.val_max_target_length = args.max_target_length
@@ -372,15 +377,16 @@ def evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, token
                     generated_tokens = generated_tokens[0]
                 decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
                 decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-                '''
-                input_seq = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
-                print("input_seq", input_seq)
-                print("postprocess_text, decoded_preds", decoded_preds)
-                print("postprocess_text, decoded_labels", decoded_labels)
-                '''
+                # Some simple post-processing
+                #decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
 
-                preds_lg.extend(decoded_preds)
-                labels_lg.extend(decoded_labels)
+                #input_seq = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
+                #print("input_seq", input_seq)
+                #print("postprocess_text, decoded_preds", decoded_preds)
+                #print("postprocess_text, decoded_labels", decoded_labels)
+
+                preds_lg.append(decoded_preds)
+                labels_lg.append(decoded_labels)
 
         results[lg] = compute_bleus(preds_lg, labels_lg)
         logger.info(f"language {lg} results:")
@@ -447,6 +453,7 @@ def main():
         config = CONFIG_MAPPING[args.model_type]()
         logger.warning("You are instantiating a new config instance from scratch.")
 
+    print("config", config)
     if args.tokenizer_name:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, use_fast=args.use_fast_tokenizer, cache_dir=args.cache_dir)
     elif args.model_name_or_path:
@@ -458,12 +465,8 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            args.model_name_or_path,
-            from_tf=bool(".ckpt" in args.model_name_or_path),
-            config=config,
-            cache_dir=args.cache_dir
-        )
+        model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name_or_path, from_tf=bool(".ckpt" in args.model_name_or_path), config=config, cache_dir=args.cache_dir)
+
     else:
         logger.info("Training new model from scratch")
         model = AutoModelForSeq2SeqLM.from_config(config)
@@ -671,8 +674,8 @@ def main():
         num_training_steps=args.max_train_steps,
     )
 
-    logger.info("***** Running first evaluating *****")
-    model, results = evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer)
+    #logger.info("***** Running first evaluating *****")
+    #model, results = evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer)
 
     logger.info("***** Running first testing *****")
     model, results = evaluated(model, args, config, gt_langs, test_dataloader, accelerator, tokenizer)
