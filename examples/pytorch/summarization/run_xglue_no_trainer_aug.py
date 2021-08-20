@@ -49,7 +49,7 @@ from transformers import (
 )
 from transformers.file_utils import is_offline_mode
 from transformers.utils.versions import require_version
-from preprocess_data import load_xglue
+from preprocess_data import load_xglue, get_data_epoch
 import pickle
 import sacrebleu
 
@@ -220,10 +220,10 @@ def parse_args():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=5e-5,
+        default=0.0001,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
-    parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
+    parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay to use.")
     parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform.")
     parser.add_argument(
         "--max_train_steps",
@@ -309,17 +309,6 @@ def postprocess_text(preds, labels):
 
         return preds, labels
 
-def compute_bleus(preds, labels, args):
-    preds, labels = np.concatenate(preds), np.concatenate(labels)
-
-    tmp_dir = os.path.join(args.output_dir, "tmp_bleu")
-    os.makedirs(tmp_dir, exist_ok=True)
-    np.savetxt(os.path.join(tmp_dir, "preds.txt"), preds, fmt='%s', delimiter=",")
-    np.savetxt(os.path.join(tmp_dir, "labels.txt"), labels, fmt='%s', delimiter=",")
-    result = sacrebleu.corpus_bleu(preds, [labels], lowercase=True).score / 100  # Normalize
-
-    return result
-
 def trainer(train_dataloader, model, args, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps):
     for step, batch in enumerate(train_dataloader):
         outputs = model(**batch)
@@ -382,17 +371,8 @@ def evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, token
                 decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
                 # Some simple post-processing
                 decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
-
-                #input_seq = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
-                #print("input_seq", input_seq)
-                #print("postprocess_text, decoded_preds", decoded_preds)
-                #print("postprocess_text, decoded_labels", decoded_labels)
-
                 metric.add_batch(predictions=decoded_preds, references=decoded_labels)
-                #preds_lg.append(decoded_preds)
-                #labels_lg.append(decoded_labels)
 
-        #results[lg] = compute_bleus(preds_lg, labels_lg)
         res = metric.compute()
         print(res)
         results[lg] = round(res["score"], 2)
@@ -414,11 +394,11 @@ def main():
     args = parse_args()
 
     if args.source_prefix is None and args.model_name_or_path in [
-        "t5-small",
-        "t5-base",
-        "t5-large",
-        "t5-3b",
-        "t5-11b",
+        "google/mt5-small",
+        "google/mt5-base",
+        "google/mt5-large",
+        "google/mt5-3b",
+        "google/mt5-11b",
     ]:
         logger.warning(
             "You're running a t5 model but didn't provide a source prefix, which is the expected, e.g. with "
@@ -629,22 +609,21 @@ def main():
     else:
         train_dataset = {}
         train_dataloader = {}
-        train_len = 0
-    eval_dataset, test_dataset = {}, {}
-    eval_dataloader, test_dataloader = {}, {}
-    for lg in gt_langs:
-        if args.multi_train:
+        for lg in ["en", "others"]:
             train_dataset[lg] = processed_datasets["train." + lg]
             logger.info(f"\nNumber of {lg} train_dataset: {len(train_dataset[lg])}.")
-            #for index in random.sample(range(len(train_dataset[lg])), 1):
+            # for index in random.sample(range(len(train_dataset[lg])), 1):
             for index in index_list:
                 logger.info(f"Sample {index} of the train_dataset[{lg}] set: {train_dataset[lg][index]}.")
             train_dataloader[lg] = DataLoader(
-                train_dataset[lg], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
+                train_dataset[lg], shuffle=True, collate_fn=data_collator,
+                batch_size=args.per_device_train_batch_size
             )
             train_dataloader[lg] = accelerator.prepare(train_dataloader[lg])
-            train_len += len(train_dataloader[lg])
-
+        train_len = 2 * len(train_dataloader["en"])
+    eval_dataset, test_dataset = {}, {}
+    eval_dataloader, test_dataloader = {}, {}
+    for lg in gt_langs:
         eval_dataset[lg] = processed_datasets["validation." + lg]
         logger.info(f"\nNumber of {lg} eval_dataset: {len(eval_dataset[lg])}.")
         #for index in random.sample(range(len(eval_dataset[lg])), 1):
@@ -711,9 +690,12 @@ def main():
             model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps = \
                 trainer(train_dataloader, model, args, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps)
         else:
-            for lg in gt_langs:
-                model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps = \
-                    trainer(train_dataloader[lg], model, args, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps)
+            model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps = \
+                trainer(train_dataloader["en"], model, args, accelerator, optimizer, lr_scheduler, progress_bar,
+                        completed_steps)
+            filtered_data = get_data_epoch(args, train_dataloader["others"], model)
+            model, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps = \
+                trainer(filtered_data, model, args, accelerator, optimizer, lr_scheduler, progress_bar, completed_steps)
 
         logger.info("***** Running evaluating *****")
         model, results = evaluated(model, args, config, gt_langs, eval_dataloader, accelerator, tokenizer, metric)
