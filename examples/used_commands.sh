@@ -44,3 +44,6 @@ nohup python -u -m torch.distributed.launch --nproc_per_node 2 --use_env example
 # 8.23
 "python -m pip install virtualenv --user && python -m virtualenv /tmp/env_mt5 && . /tmp/env_mt5/bin/activate && python -m pip install --editable .  && pip install -r ./examples/pytorch/summarization/requirements.txt && python -m pip install torch==1.5.0 && python --version && python -u -m torch.distributed.launch --nproc_per_node 4 --use_env examples/pytorch/summarization/run_xglue_no_trainer.py --model_name_or_path=google/mt5-base  --dataset_name=ntg  --data_folder=[#input-training-data-path] --output_dir=./results/mT5_base_ntg_2 --per_device_train_batch_size=2 --per_device_eval_batch_size=4 --cache_dir=[#input-previous-model-path]"
 
+# 8.25
+nohup python -u -m torch.distributed.launch --nproc_per_node 2 --use_env examples/pytorch/text-classification/run_xnli.py  --model_name_or_path="joeddav/xlm-roberta-large-xnli"  --language=de  --output_dir=./results/xnli_de --per_device_eval_batch_size=8 --cache_dir=../ckpt/xlm-roberta-large-xnli --do_predict &> logs/xnli_de.out &
+

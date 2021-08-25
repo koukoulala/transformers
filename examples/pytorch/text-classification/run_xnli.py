@@ -102,6 +102,10 @@ class DataTrainingArguments:
             "value if set."
         },
     )
+    data_cache_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Where do you want to store the data downloaded from huggingface.co"},
+    )
     server_ip: Optional[str] = field(default=None, metadata={"help": "For distant debugging."})
     server_port: Optional[str] = field(default=None, metadata={"help": "For distant debugging."})
 
@@ -213,19 +217,19 @@ def main():
     # Downloading and loading xnli dataset from the hub.
     if training_args.do_train:
         if model_args.train_language is None:
-            train_dataset = load_dataset("xnli", model_args.language, split="train", cache_dir=model_args.cache_dir)
+            train_dataset = load_dataset("xnli", model_args.language, split="train", cache_dir=data_args.data_cache_dir)
         else:
             train_dataset = load_dataset(
-                "xnli", model_args.train_language, split="train", cache_dir=model_args.cache_dir
+                "xnli", model_args.train_language, split="train", cache_dir=data_args.data_cache_dir
             )
         label_list = train_dataset.features["label"].names
 
     if training_args.do_eval:
-        eval_dataset = load_dataset("xnli", model_args.language, split="validation", cache_dir=model_args.cache_dir)
+        eval_dataset = load_dataset("xnli", model_args.language, split="validation", cache_dir=data_args.data_cache_dir)
         label_list = eval_dataset.features["label"].names
 
     if training_args.do_predict:
-        predict_dataset = load_dataset("xnli", model_args.language, split="test", cache_dir=model_args.cache_dir)
+        predict_dataset = load_dataset("xnli", model_args.language, split="test", cache_dir=data_args.data_cache_dir)
         label_list = predict_dataset.features["label"].names
 
     # Labels
