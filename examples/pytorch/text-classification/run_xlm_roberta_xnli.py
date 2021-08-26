@@ -64,7 +64,7 @@ def parse_args():
     parser.add_argument(
         "--max_length",
         type=int,
-        default=512,
+        default=128,
         help=(
             "The maximum total input sequence length after tokenization. Sequences longer than this will be truncated,"
             " sequences shorter will be padded if `--pad_to_max_lengh` is passed."
@@ -131,6 +131,9 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     parser.add_argument(
+        "--cache_dir", type=str, default=None, help="Where to store the ckpt downloaded from huggingface.co",
+    )
+    parser.add_argument(
         "--data_cache_dir", type=str, default=None, help="Where to store the datasets downloaded from huggingface.co",
     )
     parser.add_argument(
@@ -152,7 +155,9 @@ def parse_args():
 def evaluated(model, args, eval_dataloader, accelerator, metric):
     model.eval()
     for step, batch in enumerate(eval_dataloader):
+        #print("batch: ", batch)
         outputs = model(**batch)
+        #print("outputs.logits: ", outputs.logits)
         predictions = outputs.logits.argmax(dim=-1)
         metric.add_batch(
             predictions=accelerator.gather(predictions),
@@ -222,6 +227,8 @@ def main():
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name_or_path, cache_dir=args.cache_dir)
 
+    model = accelerator.prepare(model)
+
     # Preprocessing the datasets
     # Padding strategy
     padding = "max_length" if args.pad_to_max_length else False
@@ -239,13 +246,12 @@ def main():
 
     def preprocess_function(examples):
         # Tokenize the texts
-        prefix = "This example is {}."
-        hypothesis = [prefix.join(inp) for inp in examples["hypothesis"]]
+        examples["hypothesis"] = ["This example is " + x + "." for x in examples["hypothesis"]]
         return tokenizer(
             examples["premise"],
             examples["hypothesis"],
             padding=padding,
-            max_length=args.max_seq_length,
+            max_length=args.max_length,
             truncation=True,
             truncation_strategy='only_first'
         )
@@ -254,7 +260,7 @@ def main():
         train_dataset = train_dataset.map(
             preprocess_function,
             batched=True,
-            remove_columns=train_dataset.column_names,
+            #remove_columns=train_dataset.column_names,
             desc="Running tokenizer on train dataset",
         )
         # Log a few random samples from the training set:
@@ -269,25 +275,26 @@ def main():
         eval_dataset = eval_dataset.map(
             preprocess_function,
             batched=True,
-            remove_columns=eval_dataset.column_names,
+            #remove_columns=eval_dataset.column_names,
             desc="Running tokenizer on validation dataset",
         )
         for index in random.sample(range(len(eval_dataset)), 3):
             logger.info(f"Sample {index} of the eval_dataset: {eval_dataset[index]}.")
         eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
+        eval_dataloader = accelerator.prepare(eval_dataloader)
 
     if args.do_predict:
         predict_dataset = predict_dataset.map(
             preprocess_function,
             batched=True,
-            remove_columns=predict_dataset.column_names,
+            #remove_columns=predict_dataset.column_names,
             desc="Running tokenizer on prediction dataset",
         )
         for index in random.sample(range(len(predict_dataset)), 3):
             logger.info(f"Sample {index} of the predict_dataset: {predict_dataset[index]}.")
 
         predict_dataloader = DataLoader(predict_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
-
+        predict_dataloader = accelerator.prepare(predict_dataloader)
 
     # Get the metric function
     metric = load_metric("accuracy")
@@ -309,9 +316,7 @@ def main():
         optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
 
         # Prepare everything with our `accelerator`.
-        model, optimizer, train_dataloader, eval_dataloader, predict_dataloader = accelerator.prepare(
-            model, optimizer, train_dataloader, eval_dataloader, predict_dataloader
-        )
+        optimizer, train_dataloader = accelerator.prepare(optimizer, train_dataloader)
 
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         if args.max_train_steps is None:
