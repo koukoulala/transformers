@@ -46,4 +46,5 @@ nohup python -u -m torch.distributed.launch --nproc_per_node 2 --use_env example
 
 # 8.25
 nohup python -u -m torch.distributed.launch --nproc_per_node 2 --use_env examples/pytorch/text-classification/run_xnli.py  --model_name_or_path="joeddav/xlm-roberta-large-xnli"  --language=de  --output_dir=./results/xnli_de --per_device_eval_batch_size=8 --cache_dir=../ckpt/xlm-roberta-large-xnli --do_predict &> logs/xnli_de.out &
+nohup python -u -m torch.distributed.launch --nproc_per_node 2 --use_env examples/pytorch/text-classification/run_xnli.py  --model_name_or_path="joeddav/xlm-roberta-large-xnli"  --language=en  --output_dir=./results/xnli_en --per_device_eval_batch_size=8 --cache_dir=../ckpt/xlm-roberta-large-xnli --do_predict --do_eval --overwrite_cache=True &> logs/xnli_en.out &
 
