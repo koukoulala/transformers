@@ -273,13 +273,18 @@ def main():
 
     def preprocess_function(examples):
         # Tokenize the texts
+        prefix = "This example is {}."
+        hypothesis = [prefix.join(inp) for inp in examples["hypothesis"]]
+        #return tokenizer.encode(examples["premise"], hypothesis, truncation_strategy='only_first')
         return tokenizer(
             examples["premise"],
-            examples["hypothesis"],
+            hypothesis,
             padding=padding,
             max_length=data_args.max_seq_length,
             truncation=True,
+            truncation_strategy='only_first'
         )
+
 
     if training_args.do_train:
         if data_args.max_train_samples is not None:
@@ -305,6 +310,8 @@ def main():
                 load_from_cache_file=not data_args.overwrite_cache,
                 desc="Running tokenizer on validation dataset",
             )
+        for index in random.sample(range(len(eval_dataset)), 3):
+            logger.info(f"Sample {index} of the eval_dataset: {eval_dataset[index]}.")
 
     if training_args.do_predict:
         if data_args.max_predict_samples is not None:
@@ -316,6 +323,8 @@ def main():
                 load_from_cache_file=not data_args.overwrite_cache,
                 desc="Running tokenizer on prediction dataset",
             )
+        for index in random.sample(range(len(predict_dataset)), 3):
+            logger.info(f"Sample {index} of the predict_dataset: {predict_dataset[index]}.")
 
     # Get the metric function
     metric = load_metric("xnli")
