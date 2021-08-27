@@ -115,11 +115,11 @@ def main():
 
     model = accelerator.prepare(model)
 
-    output_predict_file = os.path.join(args.output_dir, "predictions.txt")
+    output_predict_file = os.path.join(args.output_dir, "predictions.tsv")
     fw = open(output_predict_file, "w")
     with open(args.predict_file, encoding="utf-8") as pred_f:
         for idx, line in enumerate(pred_f):
-            desc, sent = line.strip().split('\t')
+            id, label, desc, sent, task_id = line.strip().split('\t')
             premise = sent
             hypothesis = f'This example is {desc}.'
 
