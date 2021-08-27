@@ -119,7 +119,7 @@ def main():
     fw = open(output_predict_file, "w")
     with open(args.predict_file, encoding="utf-8") as pred_f:
         for idx, line in enumerate(pred_f):
-            desc, sent = line.strip().split()
+            desc, sent = line.strip().split('\t')
             premise = sent
             hypothesis = f'This example is {desc}.'
 
@@ -130,9 +130,12 @@ def main():
 
             entail_contradiction_logits = logits[:, [0, 2]]
             probs = entail_contradiction_logits.softmax(dim=1)
-            prob_label_is_true = probs[:, 1].cpu().numpy()[0]
+            prob_label_is_true = probs[:, 1].detach().cpu().numpy()[0]
 
             fw.write(f"{idx}\t{prob_label_is_true}\t{pred}\n")
+
+            if idx % 100 == 0:
+                logger.info(f"Now dealing {idx}")
 
     fw.close()
 

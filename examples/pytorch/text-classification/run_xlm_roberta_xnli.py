@@ -216,9 +216,6 @@ def main():
         predict_dataset = load_dataset("xnli", args.language, split="test", cache_dir=args.data_cache_dir)
         label_list = predict_dataset.features["label"].names
 
-    # Labels
-    num_labels = len(label_list)
-
     # Load pretrained model and tokenizer
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
@@ -345,6 +342,7 @@ def main():
         progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
         completed_steps = 0
 
+        best_eval_acc = 0.0
         for epoch in range(args.num_train_epochs):
             model.train()
             for step, batch in enumerate(train_dataloader):
@@ -361,10 +359,16 @@ def main():
 
                 if completed_steps >= args.max_train_steps:
                     break
-            if args.output_dir is not None:
-                accelerator.wait_for_everyone()
-                unwrapped_model = accelerator.unwrap_model(model)
-                unwrapped_model.save_pretrained(args.output_dir, save_function=accelerator.save)
+
+            logger.info(f"doing evaluating at epoch {epoch} ")
+            model, eval_metric, predictions = evaluated(model, args, eval_dataloader, accelerator, metric)
+            if eval_metric['accuracy'] > best_eval_acc:
+                best_eval_acc = eval_metric['accuracy']
+                logger.info("saving best ckpt")
+                if args.output_dir is not None:
+                    accelerator.wait_for_everyone()
+                    unwrapped_model = accelerator.unwrap_model(model)
+                    unwrapped_model.save_pretrained(args.output_dir, save_function=accelerator.save)
 
     if args.do_eval:
         logger.info("doing evaluating: ")
